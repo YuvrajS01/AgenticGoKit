@@ -69,14 +69,15 @@ type RAGConfig struct {
 
 // ToolsConfig contains tool management configuration
 type ToolsConfig struct {
-	Enabled        bool                  `toml:"enabled"`
-	MaxRetries     int                   `toml:"max_retries"`
-	Timeout        time.Duration         `toml:"timeout"`
-	RateLimit      int                   `toml:"rate_limit"`     // requests per second
-	MaxConcurrent  int                   `toml:"max_concurrent"` // max parallel executions
-	MCP            *MCPConfig            `toml:"mcp,omitempty"`
-	Cache          *CacheConfig          `toml:"cache,omitempty"`
-	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
+	Enabled          bool                  `toml:"enabled"`
+	MaxRetries       int                   `toml:"max_retries"`
+	Timeout          time.Duration         `toml:"timeout"`
+	RateLimit        int                   `toml:"rate_limit"`     // requests per second
+	MaxConcurrent    int                   `toml:"max_concurrent"` // max parallel executions
+	SingleCallPolicy string                `toml:"single_call_policy" json:"single_call_policy,omitempty"`
+	MCP              *MCPConfig            `toml:"mcp,omitempty"`
+	Cache            *CacheConfig          `toml:"cache,omitempty"`
+	CircuitBreaker   *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
 }
 
 // MCPConfig contains MCP server configuration

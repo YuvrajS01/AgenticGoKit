@@ -144,6 +144,20 @@ func (o *OllamaAdapter) Call(ctx context.Context, prompt Prompt) (Response, erro
 		"stream":      false,
 	}
 
+	// Include native tools if provided
+	if len(prompt.Tools) > 0 {
+		tools := make([]map[string]interface{}, len(prompt.Tools))
+		for i, tool := range prompt.Tools {
+			tools[i] = map[string]interface{}{
+				"type":     tool.Type,
+				"function": tool.Function,
+			}
+		}
+		requestBody["tools"] = tools
+		// Hint the model to choose tools automatically when appropriate
+		requestBody["tool_choice"] = "auto"
+	}
+
 	payload, err := json.Marshal(requestBody)
 	if err != nil {
 		return Response{}, fmt.Errorf("failed to marshal request body: %w", err)
@@ -171,16 +185,37 @@ func (o *OllamaAdapter) Call(ctx context.Context, prompt Prompt) (Response, erro
 
 	var apiResp struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string                 `json:"name"`
+					Arguments map[string]interface{} `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return Response{}, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return Response{
+	response := Response{
 		Content: apiResp.Message.Content,
-	}, nil
+	}
+
+	if len(apiResp.Message.ToolCalls) > 0 {
+		response.ToolCalls = make([]ToolCallResponse, len(apiResp.Message.ToolCalls))
+		for i, tc := range apiResp.Message.ToolCalls {
+			response.ToolCalls[i] = ToolCallResponse{
+				Type: "function",
+				Function: FunctionCallResponse{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			}
+		}
+	}
+
+	return response, nil
 }
 
 // Stream implements the ModelProvider interface for streaming responses.
