@@ -5,8 +5,18 @@ package v1beta
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/agenticgokit/agenticgokit/internal/observability"
 )
 
 // =============================================================================
@@ -316,6 +326,66 @@ func (w *basicWorkflow) Run(ctx context.Context, input string) (*WorkflowResult,
 
 // RunStream implements Workflow.RunStream
 func (w *basicWorkflow) RunStream(ctx context.Context, input string, opts ...StreamOption) (Stream, error) {
+	var tracerShutdown func(context.Context) error
+	// Setup workflow-level observability if enabled
+	if traceEnv := os.Getenv("AGK_TRACE"); traceEnv == "true" {
+		// Create or reuse run ID
+		runID := os.Getenv("AGK_RUN_ID")
+		if runID == "" {
+			runID = fmt.Sprintf("run-%d", time.Now().UnixNano())
+			_ = os.Setenv("AGK_RUN_ID", runID)
+		}
+		ctx = observability.WithRunID(ctx, runID)
+
+		exporter := os.Getenv("AGK_TRACE_EXPORTER")
+		if exporter == "" {
+			exporter = "file"
+		}
+
+		endpoint := os.Getenv("AGK_TRACE_ENDPOINT")
+		filePath := os.Getenv("AGK_TRACE_FILEPATH")
+
+		if exporter == "file" && filePath == "" {
+			runDir := filepath.Join(".agk", "runs", runID)
+			if err := os.MkdirAll(runDir, 0755); err == nil {
+				filePath = filepath.Join(runDir, "trace.jsonl")
+				_ = os.Setenv("AGK_TRACE_FILEPATH", filePath)
+			}
+		}
+
+		if (exporter == "otlp" || exporter == "otlphttp") && endpoint == "" {
+			endpoint = "http://localhost:4318"
+		}
+
+		sampleRate := 1.0
+		if sampleRateStr := os.Getenv("AGK_TRACE_SAMPLE"); sampleRateStr != "" {
+			if rate, err := strconv.ParseFloat(sampleRateStr, 64); err == nil {
+				sampleRate = rate
+			}
+		}
+
+		env := os.Getenv("AGK_ENV")
+		if env == "" {
+			env = "dev"
+		}
+
+		tracerConfig := observability.TracerConfig{
+			ServiceName:    "workflow",
+			ServiceVersion: "1.0.0",
+			Environment:    env,
+			Exporter:       exporter,
+			Endpoint:       endpoint,
+			FilePath:       filePath,
+			SampleRate:     sampleRate,
+		}
+
+		if shutdown, err := observability.SetupTracer(ctx, tracerConfig); err == nil {
+			tracerShutdown = shutdown
+			_ = os.Setenv("AGK_TRACER_READY", "1")
+			fmt.Printf("🔍 Workflow tracing enabled: exporter=%s, runID=%s\n", exporter, runID)
+		}
+	}
+
 	// Use the original context for agent execution
 	// Let individual agents handle their own timeouts
 	agentCtx := ctx
@@ -335,6 +405,12 @@ func (w *basicWorkflow) RunStream(ctx context.Context, input string, opts ...Str
 	// Start workflow execution in goroutine
 	go func() {
 		defer writer.Close()
+		// Ensure tracer flushes at the end of workflow execution
+		defer func() {
+			if tracerShutdown != nil {
+				_ = tracerShutdown(context.Background())
+			}
+		}()
 		startTime := time.Now()
 
 		// Debug: Check if context is already cancelled
@@ -459,6 +535,22 @@ func safeStreamWrite(writer StreamWriter, chunk *StreamChunk, stepName string) (
 
 // executeSequentialStreaming runs steps one after another with streaming
 func (w *basicWorkflow) executeSequentialStreaming(ctx context.Context, input string, writer StreamWriter) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.sequential",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "sequential"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer func() {
+		span.SetAttributes(
+			attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(workflowStartTime).Milliseconds()),
+		)
+		span.End()
+	}()
+
 	w.mu.RLock()
 	steps := w.steps
 	w.mu.RUnlock()
@@ -471,9 +563,20 @@ func (w *basicWorkflow) executeSequentialStreaming(ctx context.Context, input st
 		select {
 		case <-ctx.Done():
 			contextErr := fmt.Errorf("sequential workflow cancelled at step %d/%d (%s): %w", i+1, len(steps), step.Name, ctx.Err())
+			span.SetStatus(codes.Error, "context cancelled")
+			span.RecordError(contextErr)
 			return results, currentInput, contextErr
 		default:
 		}
+
+		// Create step span
+		stepStartTime := time.Now()
+		_, stepSpan := tracer.Start(ctx, "agk.workflow.step",
+			trace.WithAttributes(
+				attribute.String(observability.AttrWorkflowStepName, step.Name),
+				attribute.Int(observability.AttrWorkflowStepIndex, i),
+				attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			))
 
 		// Emit step start with safe writing
 		stepStartChunk := &StreamChunk{
@@ -491,30 +594,89 @@ func (w *basicWorkflow) executeSequentialStreaming(ctx context.Context, input st
 			fmt.Printf("Warning: Failed to write step start chunk: %v\n", writeErr)
 		}
 
+		// Apply input transformation
+		stepInput := currentInput
+		if step.Transform != nil {
+			transformStartTime := time.Now()
+			_, transformSpan := tracer.Start(ctx, "agk.workflow.transform",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowStepName, step.Name),
+					attribute.Int(observability.AttrWorkflowStepIndex, i),
+				))
+			stepInput = step.Transform(currentInput)
+			transformSpan.SetAttributes(
+				attribute.Int(observability.AttrWorkflowInputBytes, len(currentInput)),
+				attribute.Int(observability.AttrWorkflowOutputBytes, len(stepInput)),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(transformStartTime).Milliseconds()),
+			)
+			transformSpan.End()
+		}
+
 		// Execute step with streaming if agent supports it
-		stepResult, output, err := w.executeStepStreaming(ctx, step, currentInput, writer)
+		stepResult, output, err := w.executeStepStreaming(ctx, step, stepInput, writer)
+		stepDuration := time.Since(stepStartTime)
 		results = append(results, stepResult)
 
+		// Record step span attributes
+		inputSize := len(stepInput)
+		outputSize := len(output)
+		stepSpan.SetAttributes(
+			attribute.Int(observability.AttrWorkflowInputBytes, inputSize),
+			attribute.Int(observability.AttrWorkflowOutputBytes, outputSize),
+			attribute.Int64(observability.AttrWorkflowLatencyMs, stepDuration.Milliseconds()),
+			attribute.Bool(observability.AttrWorkflowSuccess, stepResult.Success),
+			attribute.Int(observability.AttrWorkflowTokensUsed, stepResult.Tokens),
+		)
+
 		if err != nil {
+			stepSpan.SetStatus(codes.Error, err.Error())
+			stepSpan.RecordError(err)
+			stepSpan.End()
+			span.SetStatus(codes.Error, "step failed")
+			span.RecordError(err)
 			// Enhanced error with step context
 			stepErr := fmt.Errorf("sequential workflow step %d/%d (%s) failed after processing %d steps: %w",
 				i+1, len(steps), step.Name, len(results), err)
 			return results, currentInput, stepErr
 		}
 
+		stepSpan.End()
 		currentInput = output
 	}
+
+	span.SetAttributes(
+		attribute.Int(observability.AttrWorkflowCompletedSteps, len(results)),
+		attribute.Bool(observability.AttrWorkflowSuccess, true),
+	)
+	span.SetStatus(codes.Ok, "workflow completed successfully")
 
 	return results, currentInput, nil
 }
 
 // executeParallelStreaming runs all steps concurrently with streaming
 func (w *basicWorkflow) executeParallelStreaming(ctx context.Context, input string, writer StreamWriter) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.parallel",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "parallel"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer func() {
+		span.SetAttributes(
+			attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(workflowStartTime).Milliseconds()),
+		)
+		span.End()
+	}()
+
 	w.mu.RLock()
 	steps := w.steps
 	w.mu.RUnlock()
 
 	if len(steps) == 0 {
+		span.SetStatus(codes.Ok, "no steps to execute")
 		return []StepResult{}, input, nil
 	}
 
@@ -528,6 +690,15 @@ func (w *basicWorkflow) executeParallelStreaming(ctx context.Context, input stri
 		go func(idx int, s WorkflowStep) {
 			defer wg.Done()
 
+			stepStartTime := time.Now()
+			_, stepSpan := tracer.Start(ctx, "agk.workflow.step",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowStepName, s.Name),
+					attribute.Int(observability.AttrWorkflowStepIndex, idx),
+					attribute.Bool("agk.workflow.parallel_execution", true),
+				))
+			defer stepSpan.End()
+
 			writer.Write(&StreamChunk{
 				Type:    ChunkTypeMetadata,
 				Content: fmt.Sprintf("Starting parallel step: %s", s.Name),
@@ -536,20 +707,72 @@ func (w *basicWorkflow) executeParallelStreaming(ctx context.Context, input stri
 				},
 			})
 
-			result, output, err := w.executeStepStreaming(ctx, s, input, writer)
+			// Apply input transformation
+			stepInput := input
+			if s.Transform != nil {
+				transformStartTime := time.Now()
+				_, transformSpan := tracer.Start(ctx, "agk.workflow.transform",
+					trace.WithAttributes(
+						attribute.String(observability.AttrWorkflowStepName, s.Name),
+						attribute.Int(observability.AttrWorkflowStepIndex, idx),
+					))
+				stepInput = s.Transform(input)
+				transformSpan.SetAttributes(
+					attribute.Int(observability.AttrWorkflowInputBytes, len(input)),
+					attribute.Int(observability.AttrWorkflowOutputBytes, len(stepInput)),
+					attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(transformStartTime).Milliseconds()),
+				)
+				transformSpan.End()
+			}
+
+			result, output, err := w.executeStepStreaming(ctx, s, stepInput, writer)
+			stepDuration := time.Since(stepStartTime)
 			results[idx] = result
 			outputs[idx] = output
 			errors[idx] = err
+
+			// Record step span attributes
+			stepSpan.SetAttributes(
+				attribute.Int(observability.AttrWorkflowInputBytes, len(stepInput)),
+				attribute.Int(observability.AttrWorkflowOutputBytes, len(output)),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, stepDuration.Milliseconds()),
+				attribute.Bool(observability.AttrWorkflowSuccess, err == nil),
+				attribute.Int(observability.AttrWorkflowTokensUsed, result.Tokens),
+			)
+
+			if err != nil {
+				stepSpan.SetStatus(codes.Error, err.Error())
+				stepSpan.RecordError(err)
+			} else {
+				stepSpan.SetStatus(codes.Ok, "step completed")
+			}
 		}(i, step)
 	}
 
 	wg.Wait()
 
+	// Emit sync point
+	_, syncSpan := tracer.Start(ctx, "agk.workflow.sync",
+		trace.WithAttributes(
+			attribute.Int(observability.AttrWorkflowStepCount, len(steps)),
+		))
+
 	// Check for errors
+	var firstErr error
 	for i, err := range errors {
 		if err != nil {
-			return results, "", fmt.Errorf("parallel step %s failed: %w", steps[i].Name, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parallel step %s failed: %w", steps[i].Name, err)
+			}
+			syncSpan.RecordError(err)
 		}
+	}
+	syncSpan.End()
+
+	if firstErr != nil {
+		span.SetStatus(codes.Error, "one or more steps failed")
+		span.RecordError(firstErr)
+		return results, "", firstErr
 	}
 
 	// Aggregate outputs
@@ -559,6 +782,12 @@ func (w *basicWorkflow) executeParallelStreaming(ctx context.Context, input stri
 			finalOutput += output + "\n"
 		}
 	}
+
+	span.SetAttributes(
+		attribute.Int(observability.AttrWorkflowCompletedSteps, len(results)),
+		attribute.Bool(observability.AttrWorkflowSuccess, true),
+	)
+	span.SetStatus(codes.Ok, "workflow completed successfully")
 
 	return results, finalOutput, nil
 }
@@ -853,6 +1082,17 @@ func (w *basicWorkflow) executeStepStreaming(ctx context.Context, step WorkflowS
 
 // executeSequential runs steps one after another
 func (w *basicWorkflow) executeSequential(ctx context.Context, input string) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.sequential",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "sequential"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer span.End()
+
 	w.mu.RLock()
 	steps := w.steps
 	w.mu.RUnlock()
@@ -860,10 +1100,12 @@ func (w *basicWorkflow) executeSequential(ctx context.Context, input string) ([]
 	results := make([]StepResult, 0, len(steps))
 	currentInput := input
 
-	for _, step := range steps {
+	for i, step := range steps {
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
+			span.SetStatus(codes.Error, "context cancelled")
+			span.RecordError(ctx.Err())
 			return results, currentInput, ctx.Err()
 		default:
 		}
@@ -878,35 +1120,96 @@ func (w *basicWorkflow) executeSequential(ctx context.Context, input string) ([]
 			continue
 		}
 
+		// Create step span
+		stepStartTime := time.Now()
+		_, stepSpan := tracer.Start(ctx, "agk.workflow.step",
+			trace.WithAttributes(
+				attribute.String(observability.AttrWorkflowStepName, step.Name),
+				attribute.Int(observability.AttrWorkflowStepIndex, i),
+				attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			))
+
 		// Apply input transformation
 		stepInput := currentInput
 		if step.Transform != nil {
+			// Record transformation
+			transformStartTime := time.Now()
+			_, transformSpan := tracer.Start(ctx, "agk.workflow.transform",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowStepName, step.Name),
+					attribute.Int(observability.AttrWorkflowStepIndex, i),
+				))
 			stepInput = step.Transform(currentInput)
+			transformSpan.SetAttributes(
+				attribute.Int(observability.AttrWorkflowInputBytes, len(currentInput)),
+				attribute.Int(observability.AttrWorkflowOutputBytes, len(stepInput)),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(transformStartTime).Milliseconds()),
+			)
+			transformSpan.End()
 		}
 
 		// Execute step
 		result := w.executeStep(ctx, &step, stepInput)
+		stepDuration := time.Since(stepStartTime)
 		results = append(results, result)
+
+		// Record step span attributes
+		inputSize := len(stepInput)
+		outputSize := len(result.Output)
+		stepSpan.SetAttributes(
+			attribute.Int(observability.AttrWorkflowInputBytes, inputSize),
+			attribute.Int(observability.AttrWorkflowOutputBytes, outputSize),
+			attribute.Int64(observability.AttrWorkflowLatencyMs, stepDuration.Milliseconds()),
+			attribute.Bool(observability.AttrWorkflowSuccess, result.Success),
+			attribute.Int(observability.AttrWorkflowTokensUsed, result.Tokens),
+		)
 
 		// Store result in context
 		w.context.mu.Lock()
 		w.context.StepResults[step.Name] = &result
 		w.context.mu.Unlock()
 
-		// If step failed, stop workflow
+		// Handle step errors
 		if !result.Success {
+			stepSpan.SetStatus(codes.Error, result.Error)
+			stepSpan.RecordError(fmt.Errorf(result.Error))
+			stepSpan.End()
+			span.SetStatus(codes.Error, fmt.Sprintf("step %s failed", step.Name))
+			span.RecordError(fmt.Errorf("step %s failed: %s", step.Name, result.Error))
 			return results, currentInput, fmt.Errorf("step %s failed: %s", step.Name, result.Error)
 		}
+
+		stepSpan.SetStatus(codes.Ok, "success")
+		stepSpan.End()
 
 		// Use output as input for next step
 		currentInput = result.Output
 	}
+
+	// Record workflow duration and completion
+	workflowDuration := time.Since(workflowStartTime)
+	span.SetAttributes(
+		attribute.Int64(observability.AttrWorkflowLatencyMs, workflowDuration.Milliseconds()),
+		attribute.Int(observability.AttrWorkflowCompletedSteps, len(results)),
+	)
+	span.SetStatus(codes.Ok, "success")
 
 	return results, currentInput, nil
 }
 
 // executeParallel runs all steps concurrently
 func (w *basicWorkflow) executeParallel(ctx context.Context, input string) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.parallel",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "parallel"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer span.End()
+
 	w.mu.RLock()
 	steps := w.steps
 	w.mu.RUnlock()
@@ -915,6 +1218,7 @@ func (w *basicWorkflow) executeParallel(ctx context.Context, input string) ([]St
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	errors := make([]error, 0)
+	syncStartTime := time.Now()
 
 	for i, step := range steps {
 		wg.Add(1)
@@ -933,14 +1237,37 @@ func (w *basicWorkflow) executeParallel(ctx context.Context, input string) ([]St
 				return
 			}
 
+			// Create step span for this parallel execution
+			stepStartTime := time.Now()
+			_, stepSpan := tracer.Start(ctx, "agk.workflow.step",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowStepName, s.Name),
+					attribute.Int(observability.AttrWorkflowStepIndex, idx),
+					attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+					attribute.Bool("agk.workflow.parallel_execution", true),
+				))
+
 			// Apply input transformation
 			stepInput := input
 			if s.Transform != nil {
+				transformStartTime := time.Now()
+				_, transformSpan := tracer.Start(ctx, "agk.workflow.transform",
+					trace.WithAttributes(
+						attribute.String(observability.AttrWorkflowStepName, s.Name),
+						attribute.Int(observability.AttrWorkflowStepIndex, idx),
+					))
 				stepInput = s.Transform(input)
+				transformSpan.SetAttributes(
+					attribute.Int(observability.AttrWorkflowInputBytes, len(input)),
+					attribute.Int(observability.AttrWorkflowOutputBytes, len(stepInput)),
+					attribute.Int64(observability.AttrWorkflowLatencyMs, time.Since(transformStartTime).Milliseconds()),
+				)
+				transformSpan.End()
 			}
 
 			// Execute step
 			result := w.executeStep(ctx, &s, stepInput)
+			stepDuration := time.Since(stepStartTime)
 
 			mu.Lock()
 			results[idx] = result
@@ -949,10 +1276,38 @@ func (w *basicWorkflow) executeParallel(ctx context.Context, input string) ([]St
 				errors = append(errors, fmt.Errorf("step %s failed: %s", s.Name, result.Error))
 			}
 			mu.Unlock()
+
+			// Record step span attributes
+			inputSize := len(stepInput)
+			outputSize := len(result.Output)
+			stepSpan.SetAttributes(
+				attribute.Int(observability.AttrWorkflowInputBytes, inputSize),
+				attribute.Int(observability.AttrWorkflowOutputBytes, outputSize),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, stepDuration.Milliseconds()),
+				attribute.Bool(observability.AttrWorkflowSuccess, result.Success),
+				attribute.Int(observability.AttrWorkflowTokensUsed, result.Tokens),
+			)
+
+			if !result.Success {
+				stepSpan.SetStatus(codes.Error, result.Error)
+				stepSpan.RecordError(fmt.Errorf(result.Error))
+			} else {
+				stepSpan.SetStatus(codes.Ok, "success")
+			}
+			stepSpan.End()
 		}(i, step)
 	}
 
 	wg.Wait()
+
+	// Record synchronization overhead
+	syncDuration := time.Since(syncStartTime)
+	_, syncSpan := tracer.Start(ctx, "agk.workflow.sync",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.Int64(observability.AttrWorkflowLatencyMs, syncDuration.Milliseconds()),
+		))
+	syncSpan.End()
 
 	// Combine outputs (concatenate all successful outputs)
 	var finalOutput string
@@ -969,13 +1324,42 @@ func (w *basicWorkflow) executeParallel(ctx context.Context, input string) ([]St
 	var err error
 	if len(errors) > 0 {
 		err = errors[0]
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+	} else {
+		span.SetStatus(codes.Ok, "success")
 	}
+
+	// Record workflow duration and completion
+	workflowDuration := time.Since(workflowStartTime)
+	completedSteps := 0
+	for _, result := range results {
+		if !result.Skipped {
+			completedSteps++
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int64(observability.AttrWorkflowLatencyMs, workflowDuration.Milliseconds()),
+		attribute.Int(observability.AttrWorkflowCompletedSteps, completedSteps),
+	)
 
 	return results, finalOutput, err
 }
 
 // executeDAG runs steps based on dependency order
 func (w *basicWorkflow) executeDAG(ctx context.Context, input string) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.dag",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "dag"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer span.End()
+
 	w.mu.RLock()
 	steps := w.steps
 	w.mu.RUnlock()
@@ -984,12 +1368,19 @@ func (w *basicWorkflow) executeDAG(ctx context.Context, input string) ([]StepRes
 	completed := make(map[string]bool)
 	results := make([]StepResult, 0, len(steps))
 	finalOutput := input
+	stageNum := 0
 
 	// Execute steps in dependency order
 	for len(completed) < len(steps) {
 		executed := false
+		stageStartTime := time.Now()
+		_, stageSpan := tracer.Start(ctx, "agk.workflow.stage",
+			trace.WithAttributes(
+				attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+				attribute.Int("agk.workflow.stage_number", stageNum),
+			))
 
-		for _, step := range steps {
+		for i, step := range steps {
 			// Skip if already completed
 			if completed[step.Name] {
 				continue
@@ -1021,6 +1412,16 @@ func (w *basicWorkflow) executeDAG(ctx context.Context, input string) ([]StepRes
 				continue
 			}
 
+			// Create step span
+			stepStartTime := time.Now()
+			_, stepSpan := tracer.Start(ctx, "agk.workflow.step",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowStepName, step.Name),
+					attribute.Int(observability.AttrWorkflowStepIndex, i),
+					attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+					attribute.StringSlice("agk.workflow.dependencies", step.Dependencies),
+				))
+
 			// Build input from dependencies
 			stepInput := w.buildInputFromDependencies(step.Dependencies, input)
 			if step.Transform != nil {
@@ -1030,40 +1431,96 @@ func (w *basicWorkflow) executeDAG(ctx context.Context, input string) ([]StepRes
 			// Execute step
 			result := w.executeStep(ctx, &step, stepInput)
 			results = append(results, result)
+			stepDuration := time.Since(stepStartTime)
 
 			// Store result
 			w.context.mu.Lock()
 			w.context.StepResults[step.Name] = &result
 			w.context.mu.Unlock()
 
+			// Record step span attributes
+			inputSize := len(stepInput)
+			outputSize := len(result.Output)
+			stepSpan.SetAttributes(
+				attribute.Int(observability.AttrWorkflowInputBytes, inputSize),
+				attribute.Int(observability.AttrWorkflowOutputBytes, outputSize),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, stepDuration.Milliseconds()),
+				attribute.Bool(observability.AttrWorkflowSuccess, result.Success),
+				attribute.Int(observability.AttrWorkflowTokensUsed, result.Tokens),
+			)
+
 			completed[step.Name] = true
 			executed = true
 
 			if !result.Success {
+				stepSpan.SetStatus(codes.Error, result.Error)
+				stepSpan.RecordError(fmt.Errorf(result.Error))
+				stepSpan.End()
+				stageSpan.SetStatus(codes.Error, result.Error)
+				stageSpan.End()
+				span.SetStatus(codes.Error, fmt.Sprintf("step %s failed", step.Name))
+				span.RecordError(fmt.Errorf("step %s failed: %s", step.Name, result.Error))
 				return results, finalOutput, fmt.Errorf("step %s failed: %s", step.Name, result.Error)
 			}
+
+			stepSpan.SetStatus(codes.Ok, "success")
+			stepSpan.End()
 
 			finalOutput = result.Output
 		}
 
+		// Record stage completion
+		stageDuration := time.Since(stageStartTime)
+		stageSpan.SetAttributes(
+			attribute.Int64("agk.workflow.stage_duration_ms", stageDuration.Milliseconds()),
+		)
+		stageSpan.SetStatus(codes.Ok, "success")
+		stageSpan.End()
+		stageNum++
+
 		// Check for deadlock (circular dependencies)
 		if !executed {
+			span.SetStatus(codes.Error, "workflow deadlock detected")
+			span.RecordError(fmt.Errorf("circular dependencies or missing steps"))
 			return results, finalOutput, fmt.Errorf("workflow deadlock detected: circular dependencies or missing steps")
 		}
 
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
+			span.SetStatus(codes.Error, "context cancelled")
+			span.RecordError(ctx.Err())
 			return results, finalOutput, ctx.Err()
 		default:
 		}
 	}
+
+	// Record workflow duration and completion
+	workflowDuration := time.Since(workflowStartTime)
+	span.SetAttributes(
+		attribute.Int64(observability.AttrWorkflowLatencyMs, workflowDuration.Milliseconds()),
+		attribute.Int("agk.workflow.stage_count", stageNum),
+		attribute.Int(observability.AttrWorkflowCompletedSteps, len(results)),
+	)
+	span.SetStatus(codes.Ok, "success")
 
 	return results, finalOutput, nil
 }
 
 // executeLoop repeats steps until max iterations or condition is met
 func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepResult, string, error) {
+	tracer := otel.Tracer("agenticgokit")
+	workflowStartTime := time.Now()
+	ctx, span := tracer.Start(ctx, "agk.workflow.loop",
+		trace.WithAttributes(
+			attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+			attribute.String(observability.AttrWorkflowMode, "loop"),
+			attribute.Int(observability.AttrWorkflowStepCount, len(w.steps)),
+			attribute.Int("agk.workflow.max_iterations", w.config.MaxIterations),
+			attribute.Int(observability.AttrWorkflowTimeout, int(w.config.Timeout.Seconds())),
+		))
+	defer span.End()
+
 	maxIterations := w.config.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 10
@@ -1080,30 +1537,64 @@ func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepRe
 
 		// Check custom loop condition BEFORE executing iteration
 		if w.config.LoopCondition != nil {
+			conditionStartTime := time.Now()
+			_, conditionSpan := tracer.Start(ctx, "agk.workflow.condition_check",
+				trace.WithAttributes(
+					attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+					attribute.Int("agk.workflow.iteration_number", iteration),
+				))
+
 			shouldContinue, err := w.config.LoopCondition(ctx, iteration, lastResult)
+			conditionDuration := time.Since(conditionStartTime)
+
+			conditionSpan.SetAttributes(
+				attribute.Bool("agk.workflow.condition_satisfied", shouldContinue),
+				attribute.Int64(observability.AttrWorkflowLatencyMs, conditionDuration.Milliseconds()),
+			)
+
 			if err != nil {
 				exitReason = ExitError
+				conditionSpan.SetStatus(codes.Error, err.Error())
+				conditionSpan.RecordError(err)
+				conditionSpan.End()
 				// Store iteration info before returning error
 				w.context.Set("iteration_info", &IterationInfo{
 					TotalIterations:  lastIterationExecuted + 1,
 					ExitReason:       exitReason,
 					LastIterationNum: lastIterationExecuted,
 				})
+				span.SetStatus(codes.Error, fmt.Sprintf("loop condition error at iteration %d", iteration))
+				span.RecordError(err)
 				return allResults, currentInput, fmt.Errorf("loop condition error: %w", err)
 			}
+
+			conditionSpan.SetStatus(codes.Ok, "success")
+			conditionSpan.End()
+
 			if !shouldContinue {
 				exitReason = ExitConditionMet
 				break
 			}
 		}
 
-		// Execute one iteration
+		// Create iteration span
 		lastIterationExecuted = iteration // Track that we're executing this iteration
 		iterStartTime := time.Now()
+		_, iterationSpan := tracer.Start(ctx, "agk.workflow.iteration",
+			trace.WithAttributes(
+				attribute.String(observability.AttrWorkflowID, w.context.WorkflowID),
+				attribute.Int("agk.workflow.iteration_number", iteration),
+			))
+
 		iterResults, output, err := w.executeSequential(ctx, currentInput)
+		iterDuration := time.Since(iterStartTime)
 		allResults = append(allResults, iterResults...)
 
 		if err != nil {
+			iterationSpan.SetStatus(codes.Error, err.Error())
+			iterationSpan.RecordError(err)
+			iterationSpan.End()
+
 			// Check if error is due to context cancellation
 			if ctx.Err() != nil {
 				exitReason = ExitContextCancelled
@@ -1116,6 +1607,8 @@ func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepRe
 				ExitReason:       exitReason,
 				LastIterationNum: lastIterationExecuted,
 			})
+			span.SetStatus(codes.Error, fmt.Sprintf("iteration %d failed", iteration))
+			span.RecordError(err)
 			return allResults, output, err
 		}
 
@@ -1134,6 +1627,15 @@ func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepRe
 			Duration:    time.Since(iterStartTime),
 		}
 
+		// Record iteration span attributes
+		iterationSpan.SetAttributes(
+			attribute.Int64(observability.AttrWorkflowLatencyMs, iterDuration.Milliseconds()),
+			attribute.Bool(observability.AttrWorkflowSuccess, true),
+			attribute.Int(observability.AttrWorkflowTokensUsed, iterTokens),
+		)
+		iterationSpan.SetStatus(codes.Ok, "success")
+		iterationSpan.End()
+
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
@@ -1143,6 +1645,8 @@ func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepRe
 				ExitReason:       exitReason,
 				LastIterationNum: lastIterationExecuted,
 			})
+			span.SetStatus(codes.Error, "context cancelled")
+			span.RecordError(ctx.Err())
 			return allResults, output, ctx.Err()
 		default:
 		}
@@ -1163,11 +1667,22 @@ func (w *basicWorkflow) executeLoop(ctx context.Context, input string) ([]StepRe
 	}
 
 	// Store iteration info in context for result building
-	w.context.Set("iteration_info", &IterationInfo{
+	iterInfo := &IterationInfo{
 		TotalIterations:  lastIterationExecuted + 1,
 		ExitReason:       exitReason,
 		LastIterationNum: lastIterationExecuted,
-	})
+	}
+	w.context.Set("iteration_info", iterInfo)
+
+	// Record workflow duration and completion
+	workflowDuration := time.Since(workflowStartTime)
+	span.SetAttributes(
+		attribute.Int64(observability.AttrWorkflowLatencyMs, workflowDuration.Milliseconds()),
+		attribute.Int("agk.workflow.total_iterations", iterInfo.TotalIterations),
+		attribute.String("agk.workflow.exit_reason", string(iterInfo.ExitReason)),
+		attribute.Int(observability.AttrWorkflowCompletedSteps, len(allResults)),
+	)
+	span.SetStatus(codes.Ok, string(exitReason))
 
 	return allResults, currentInput, nil
 }

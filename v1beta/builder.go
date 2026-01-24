@@ -3,7 +3,12 @@ package v1beta
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
+
+	"github.com/agenticgokit/agenticgokit/internal/observability"
 )
 
 // =============================================================================
@@ -18,6 +23,12 @@ type Builder interface {
 	WithPreset(preset PresetType) Builder
 	WithHandler(handler HandlerFunc) Builder
 	Build() (Agent, error)
+
+	// LLM configuration
+	WithLLM(provider, model string) Builder
+
+	// Observability
+	WithObservability(serviceName, serviceVersion string) Builder
 
 	// Convenience methods (5 methods)
 	WithMemory(opts ...MemoryOption) Builder
@@ -323,6 +334,11 @@ type streamlinedBuilder struct {
 	subworkflowMaxDepth int
 	subworkflowDesc     string
 	isSubWorkflow       bool
+
+	// Observability fields
+	observabilityEnabled bool
+	serviceName          string
+	serviceVersion       string
 }
 
 // NewBuilder creates a new streamlined agent builder
@@ -440,6 +456,40 @@ func (b *streamlinedBuilder) WithHandler(handler HandlerFunc) Builder {
 	return b
 }
 
+// WithLLM configures the LLM provider and model for the agent
+func (b *streamlinedBuilder) WithLLM(provider, model string) Builder {
+	if b.built {
+		panic("Cannot modify frozen builder. Use Clone() first.")
+	}
+	b.config.LLM.Provider = provider
+	b.config.LLM.Model = model
+	return b
+}
+
+// WithObservability enables automatic observability setup with the specified service metadata.
+// When enabled, the builder will automatically check the AGK_TRACE environment variable
+// and set up tracing, logging, and correlation if tracing is enabled.
+// The agent will own the tracer shutdown lifecycle via its Cleanup() method.
+//
+// Example:
+//
+//	agent, err := v1beta.NewBuilder("researcher").
+//	    WithObservability("my-service", "1.0.0").
+//	    Build()
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer agent.Cleanup(ctx)
+func (b *streamlinedBuilder) WithObservability(serviceName, serviceVersion string) Builder {
+	if b.built {
+		panic("Cannot modify frozen builder. Use Clone() first.")
+	}
+	b.observabilityEnabled = true
+	b.serviceName = serviceName
+	b.serviceVersion = serviceVersion
+	return b
+}
+
 // Build creates the final agent
 func (b *streamlinedBuilder) Build() (Agent, error) {
 	if b.built {
@@ -476,7 +526,18 @@ func (b *streamlinedBuilder) Build() (Agent, error) {
 
 	// Create and return the agent with REAL LLM integration
 	// OLD: return newStreamlinedAgent(b.config, b.handler), nil
-	return newRealAgent(b.config, b.handler)
+	agent, err := newRealAgent(b.config, b.handler)
+	if err != nil {
+		return nil, err
+	}
+
+	// Setup observability if enabled (via WithObservability or AGK_TRACE env var)
+	if err := b.setupObservability(agent); err != nil {
+		// Log warning but don't fail agent creation if observability setup fails
+		fmt.Printf("⚠️  Warning: Failed to setup observability: %v\n", err)
+	}
+
+	return agent, nil
 }
 
 // WithMemory configures memory with functional options
@@ -626,13 +687,16 @@ func (b *streamlinedBuilder) Clone() Builder {
 	}
 
 	return &streamlinedBuilder{
-		config:              newConfig,
-		handler:             b.handler,
-		built:               false, // New builder is not built yet
-		workflowInstance:    b.workflowInstance,
-		subworkflowMaxDepth: b.subworkflowMaxDepth,
-		subworkflowDesc:     b.subworkflowDesc,
-		isSubWorkflow:       b.isSubWorkflow,
+		config:               newConfig,
+		handler:              b.handler,
+		built:                false, // New builder is not built yet
+		workflowInstance:     b.workflowInstance,
+		subworkflowMaxDepth:  b.subworkflowMaxDepth,
+		subworkflowDesc:      b.subworkflowDesc,
+		isSubWorkflow:        b.isSubWorkflow,
+		observabilityEnabled: b.observabilityEnabled,
+		serviceName:          b.serviceName,
+		serviceVersion:       b.serviceVersion,
 	}
 }
 
@@ -652,6 +716,120 @@ func (b *streamlinedBuilder) validateConfig() error {
 
 	if b.config.Timeout <= 0 {
 		return fmt.Errorf("timeout must be positive")
+	}
+
+	return nil
+}
+
+// setupObservability configures observability for the agent if enabled
+func (b *streamlinedBuilder) setupObservability(agent Agent) error {
+	// Check if observability should be enabled
+	shouldEnableTracing := b.observabilityEnabled
+
+	// Also check AGK_TRACE environment variable as auto-detection
+	if !shouldEnableTracing {
+		if traceEnv := os.Getenv("AGK_TRACE"); traceEnv == "true" {
+			shouldEnableTracing = true
+			// Use agent name as default service name if not explicitly set
+			if b.serviceName == "" {
+				b.serviceName = b.config.Name
+			}
+			if b.serviceVersion == "" {
+				b.serviceVersion = "0.1.0"
+			}
+		}
+	}
+
+	if !shouldEnableTracing {
+		return nil // Observability not enabled
+	}
+
+	// If tracer already initialized by workflow, reuse run ID and skip setup
+	if os.Getenv("AGK_TRACER_READY") == "1" {
+		runID := os.Getenv("AGK_RUN_ID")
+		if runID == "" {
+			runID = fmt.Sprintf("run-%d", time.Now().UnixNano())
+		}
+
+		if realAgent, ok := agent.(*realAgent); ok {
+			realAgent.runID = runID
+			if path := os.Getenv("AGK_TRACE_FILEPATH"); path != "" {
+				realAgent.runDir = filepath.Dir(path)
+			}
+			fmt.Printf("🔍 Tracing enabled (workflow-owned): runID=%s\n", runID)
+		}
+		return nil
+	}
+
+	// Generate run ID for this agent
+	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
+
+	ctx := observability.WithRunID(context.Background(), runID)
+
+	// Read tracing configuration from environment
+	exporter := os.Getenv("AGK_TRACE_EXPORTER")
+	if exporter == "" {
+		exporter = "file" // Default to file exporter to avoid console mixing
+	}
+
+	endpoint := os.Getenv("AGK_TRACE_ENDPOINT")
+	filePath := os.Getenv("AGK_TRACE_FILEPATH")
+
+	// For file exporter, create runs directory structure
+	if exporter == "file" && filePath == "" {
+		// Create .agk/runs/{runID} directory
+		runDir := filepath.Join(".agk", "runs", runID)
+		if err := os.MkdirAll(runDir, 0755); err != nil {
+			return fmt.Errorf("failed to create run directory: %w", err)
+		}
+		filePath = filepath.Join(runDir, "trace.jsonl")
+	}
+
+	// For OTLP exporter, use endpoint if not specified
+	if (exporter == "otlp" || exporter == "otlphttp") && endpoint == "" {
+		endpoint = "http://localhost:4318" // Default OTLP endpoint
+	}
+
+	sampleRateStr := os.Getenv("AGK_TRACE_SAMPLE")
+	sampleRate := 1.0
+	if sampleRateStr != "" {
+		if rate, err := strconv.ParseFloat(sampleRateStr, 64); err == nil {
+			sampleRate = rate
+		}
+	}
+
+	env := os.Getenv("AGK_ENV")
+	if env == "" {
+		env = "dev"
+	}
+
+	// Setup tracer
+	tracerConfig := observability.TracerConfig{
+		ServiceName:    b.serviceName,
+		ServiceVersion: b.serviceVersion,
+		Environment:    env,
+		Exporter:       exporter,
+		Endpoint:       endpoint,
+		FilePath:       filePath,
+		SampleRate:     sampleRate,
+	}
+
+	shutdown, err := observability.SetupTracer(ctx, tracerConfig)
+	if err != nil {
+		return fmt.Errorf("failed to setup tracer: %w", err)
+	}
+
+	// Store shutdown function in the agent
+	if realAgent, ok := agent.(*realAgent); ok {
+		realAgent.tracerShutdown = shutdown
+
+		// Store run directory for manifest generation on cleanup
+		if exporter == "file" {
+			realAgent.runID = runID
+			realAgent.runDir = filepath.Join(".agk", "runs", runID)
+		}
+
+		fmt.Printf("🔍 Tracing enabled: exporter=%s, endpoint=%s, filePath=%s, runID=%s\n", exporter, endpoint, filePath, runID)
 	}
 
 	return nil

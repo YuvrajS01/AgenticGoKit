@@ -2,11 +2,15 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/agenticgokit/agenticgokit/core"
+	"github.com/agenticgokit/agenticgokit/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // =============================================================================
@@ -25,6 +29,10 @@ type AgentBuilder struct {
 	subAgents       []core.Agent
 	multiConfig     core.MultiAgentConfig
 	loopConfig      core.LoopConfig
+	// Observability fields
+	observabilityEnabled bool
+	serviceName          string
+	serviceVersion       string
 }
 
 // AgentBuilderConfig contains configuration for the agent builder
@@ -32,6 +40,7 @@ type AgentBuilderConfig struct {
 	ValidateCapabilities bool // Whether to validate capability combinations
 	SortByPriority       bool // Whether to sort capabilities by priority
 	StrictMode           bool // Whether to fail on any capability error
+	AutoTracing          bool // Whether to automatically set up tracing from env vars
 }
 
 // DefaultAgentBuilderConfig returns sensible defaults for agent builder configuration
@@ -139,6 +148,31 @@ func (b *AgentBuilder) WithMultiAgentConcurrency(maxConcurrency int) *AgentBuild
 		b.multiConfig = core.DefaultMultiAgentConfig()
 	}
 	b.multiConfig.MaxConcurrency = maxConcurrency
+	return b
+}
+
+// =============================================================================
+// OBSERVABILITY METHODS
+// =============================================================================
+
+// WithObservability enables automatic observability setup with the specified service metadata.
+// When enabled, the builder will automatically check the AGK_TRACE environment variable
+// and set up tracing, logging, and correlation if tracing is enabled.
+// The agent will own the tracer shutdown lifecycle via its Close() method.
+//
+// Example:
+//
+//	agent, err := agk.NewBuilder("researcher").
+//	    WithObservability("my-service", "1.0.0").
+//	    Build()
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer agent.Close(ctx)
+func (b *AgentBuilder) WithObservability(serviceName, serviceVersion string) *AgentBuilder {
+	b.observabilityEnabled = true
+	b.serviceName = serviceName
+	b.serviceVersion = serviceVersion
 	return b
 }
 
@@ -344,16 +378,33 @@ func (b *AgentBuilder) ClearErrors() *AgentBuilder {
 
 // Build creates the final agent with all configured capabilities
 func (b *AgentBuilder) Build() (core.Agent, error) {
+	// Start observability span for agent build
+	tracer := observability.GetTracer("agk.agents.builder")
+	ctx := context.Background()
+	ctx, span := tracer.Start(ctx, "agk.agent.build")
+	defer span.End()
+
+	// Set agent attributes on span
+	agentAttrs := observability.AgentAttributes(b.name, "unified")
+	span.SetAttributes(agentAttrs...)
+
 	// Validate the configuration
 	if err := b.Validate(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "validation failed")
 		return nil, fmt.Errorf("agent validation failed: %w", err)
 	}
 
 	// Check if this is a multi-agent composition
 	if b.compositionMode != "" {
-		// Multi-agent composition wiring will be bridged to core agents in a later step
-		return nil, fmt.Errorf("multi-agent composition not implemented yet in this refactor")
+		err := fmt.Errorf("multi-agent composition not implemented yet in this refactor")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "composition not implemented")
+		return nil, err
 	}
+
+	// Track capabilities in span
+	span.SetAttributes(attribute.Int("agk.agent.capability_count", len(b.capabilities)))
 
 	// Sort capabilities by priority if enabled
 	capabilities := b.capabilities
@@ -364,6 +415,8 @@ func (b *AgentBuilder) Build() (core.Agent, error) {
 	// Create the unified agent backed by core.UnifiedAgent
 	agent, err := createUnifiedAgent(b.name, capabilities)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "unified agent creation failed")
 		return nil, fmt.Errorf("failed to create unified agent: %w", err)
 	}
 	// Configure each capability on the agent
@@ -372,12 +425,22 @@ func (b *AgentBuilder) Build() (core.Agent, error) {
 	// We need to cast the agent to CapabilityConfigurable to configure capabilities
 	configurableAgent, ok := agent.(CapabilityConfigurable)
 	if !ok {
-		return nil, fmt.Errorf("agent does not implement CapabilityConfigurable interface")
+		err := fmt.Errorf("agent does not implement CapabilityConfigurable interface")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "interface mismatch")
+		return nil, err
 	}
 
 	for _, cap := range capabilities {
 		if err := cap.Configure(configurableAgent); err != nil {
+			// Record capability error with attributes
+			toolAttrs := observability.ToolAttributes(cap.Name(), 0)
+			span.SetAttributes(toolAttrs...)
+			span.AddEvent("capability_configuration_error")
+
 			if b.config.StrictMode {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, fmt.Sprintf("capability %s config failed", cap.Name()))
 				return nil, fmt.Errorf("failed to configure capability %s: %w", cap.Name(), err)
 			} else {
 				logger.Warn().
@@ -388,6 +451,7 @@ func (b *AgentBuilder) Build() (core.Agent, error) {
 		}
 	}
 
+	span.SetStatus(codes.Ok, "agent built successfully")
 	return agent, nil
 }
 
@@ -544,4 +608,3 @@ func (b *AgentBuilder) CanVisualize() bool {
 }
 
 // =============================================================================
-

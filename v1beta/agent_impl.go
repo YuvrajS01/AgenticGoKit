@@ -1,14 +1,25 @@
 package v1beta
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/agenticgokit/agenticgokit/core"
 	"github.com/agenticgokit/agenticgokit/internal/llm"
+	"github.com/agenticgokit/agenticgokit/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // addMultimodalDataToPrompt adds multimodal data from RunOptions to an llm.Prompt.
@@ -74,6 +85,11 @@ type realAgent struct {
 	initialized bool
 	sessions    map[string]*sessionState
 	metrics     *agentMetrics
+
+	// Observability
+	tracerShutdown func(context.Context) error
+	runID          string
+	runDir         string
 }
 
 // sessionState tracks per-session information for the agent
@@ -266,6 +282,22 @@ func (a *realAgent) Run(ctx context.Context, input string) (*Result, error) {
 func (a *realAgent) execute(ctx context.Context, input string, opts *RunOptions) (*Result, error) {
 	startTime := time.Now()
 
+	tracer := observability.GetTracer("agk.v1beta.agent")
+	ctx, span := tracer.Start(ctx, "agk.agent.run",
+		trace.WithAttributes(
+			attribute.String(observability.AttrAgentName, a.config.Name),
+			attribute.String(observability.AttrLLMProvider, a.config.LLM.Provider),
+			attribute.String(observability.AttrLLMModel, a.config.LLM.Model),
+			attribute.Bool("agk.memory.enabled", a.memoryProvider != nil && a.config.Memory != nil),
+			attribute.Int("agk.tools.count", len(a.tools)),
+		),
+	)
+	defer span.End()
+
+	if sc := span.SpanContext(); sc.IsValid() {
+		ctx = context.WithValue(ctx, "trace_id", sc.TraceID().String())
+	}
+
 	// Validate that agent is properly initialized
 	if a.llmProvider == nil {
 		return nil, fmt.Errorf("agent not properly initialized: LLM provider is nil")
@@ -365,6 +397,8 @@ func (a *realAgent) execute(ctx context.Context, input string, opts *RunOptions)
 	if err != nil {
 		// Update metrics
 		a.updateMetrics(startTime, true)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}
 
@@ -473,6 +507,23 @@ func (a *realAgent) execute(ctx context.Context, input string, opts *RunOptions)
 			"finish_reason": response.FinishReason,
 		},
 	}
+
+	if sc := span.SpanContext(); sc.IsValid() {
+		result.TraceID = sc.TraceID().String()
+	}
+
+	if runID := observability.RunIDFromContext(ctx); runID != "" {
+		span.SetAttributes(attribute.String(observability.AttrRunID, runID))
+	}
+
+	span.SetAttributes(
+		attribute.Int(observability.AttrLLMTokensIn, response.Usage.PromptTokens),
+		attribute.Int(observability.AttrLLMTokensOut, response.Usage.CompletionTokens),
+		attribute.Int(observability.AttrLLMMaxTokens, a.config.LLM.MaxTokens),
+		attribute.Float64(observability.AttrLLMTemperature, float64(a.config.LLM.Temperature)),
+	)
+
+	span.SetStatus(codes.Ok, "")
 
 	// Add tool names to ToolsCalled list for convenience
 	if len(toolCalls) > 0 {
@@ -751,25 +802,42 @@ func (a *realAgent) RunStream(ctx context.Context, input string, opts ...StreamO
 		Extra:     make(map[string]interface{}),
 	}
 
+	tracer := observability.GetTracer("agk.v1beta.agent")
+	streamCtx, span := tracer.Start(ctx, "agk.agent.run.stream",
+		trace.WithAttributes(
+			attribute.String(observability.AttrAgentName, a.config.Name),
+			attribute.String(observability.AttrLLMProvider, a.config.LLM.Provider),
+			attribute.String(observability.AttrLLMModel, a.config.LLM.Model),
+			attribute.Bool("agk.memory.enabled", a.memoryProvider != nil && a.config.Memory != nil),
+			attribute.Int("agk.tools.count", len(a.tools)),
+		),
+	)
+
 	// Add session ID if provided in context
-	if sessionID := ctx.Value("session_id"); sessionID != nil {
+	if sessionID := streamCtx.Value("session_id"); sessionID != nil {
 		if id, ok := sessionID.(string); ok {
 			metadata.SessionID = id
 		}
 	}
 
 	// Add trace ID if provided in context
-	if traceID := ctx.Value("trace_id"); traceID != nil {
+	if traceID := streamCtx.Value("trace_id"); traceID != nil {
 		if id, ok := traceID.(string); ok {
 			metadata.TraceID = id
 		}
 	}
 
+	if sc := span.SpanContext(); sc.IsValid() {
+		metadata.TraceID = sc.TraceID().String()
+		streamCtx = context.WithValue(streamCtx, "trace_id", metadata.TraceID)
+	}
+
 	// Create stream with options
-	stream, writer := NewStream(ctx, metadata, opts...)
+	stream, writer := NewStream(streamCtx, metadata, opts...)
 
 	// Start streaming in a goroutine
 	go func() {
+		defer span.End()
 		defer writer.Close()
 
 		startTime := time.Now()
@@ -816,8 +884,10 @@ func (a *realAgent) RunStream(ctx context.Context, input string, opts ...StreamO
 		}
 
 		// Start LLM streaming
-		tokenChan, err := a.llmProvider.Stream(ctx, prompt)
+		tokenChan, err := a.llmProvider.Stream(streamCtx, prompt)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			writer.Write(&StreamChunk{
 				Type:  ChunkTypeError,
 				Error: fmt.Errorf("failed to start LLM stream: %w", err),
@@ -879,8 +949,10 @@ func (a *realAgent) RunStream(ctx context.Context, input string, opts ...StreamO
 				finalResult.ToolsCalled = extractToolNames(toolCalls)
 
 				// Execute tools and stream the results
-				err := a.executeToolsAndStream(ctx, input, finalContent, toolCalls, writer)
+				err := a.executeToolsAndStream(streamCtx, input, finalContent, toolCalls, writer)
 				if err != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
 					writer.Write(&StreamChunk{
 						Type:  ChunkTypeError,
 						Error: fmt.Errorf("tool execution failed: %w", err),
@@ -904,6 +976,11 @@ func (a *realAgent) RunStream(ctx context.Context, input string, opts ...StreamO
 
 		// Update metrics
 		a.updateMetrics(startTime, false)
+		span.SetAttributes(
+			attribute.Int("agk.stream.tokens", tokenCount),
+			attribute.Int64(observability.AttrLLMLatencyMs, duration.Milliseconds()),
+		)
+		span.SetStatus(codes.Ok, "")
 
 		// Set final result on the stream
 		if s, ok := stream.(*basicStream); ok {
@@ -1152,6 +1229,21 @@ func (a *realAgent) Initialize(ctx context.Context) error {
 func (a *realAgent) Cleanup(ctx context.Context) error {
 	Logger().Debug().Str("agent", a.config.Name).Msg("Cleaning up agent resources")
 
+	// Shutdown tracer if enabled
+	if a.tracerShutdown != nil {
+		if err := a.tracerShutdown(ctx); err != nil {
+			Logger().Warn().Err(err).Msg("Error shutting down tracer")
+			// Don't return error, continue cleanup
+		}
+
+		// Generate manifest file for trace viewer (agk trace commands)
+		if a.runDir != "" {
+			if err := a.generateManifest(); err != nil {
+				Logger().Warn().Err(err).Msg("Error generating trace manifest")
+			}
+		}
+	}
+
 	// Close memory provider if present
 	if a.memoryProvider != nil {
 		if err := a.memoryProvider.Close(); err != nil {
@@ -1168,6 +1260,106 @@ func (a *realAgent) Cleanup(ctx context.Context) error {
 
 	Logger().Info().Str("agent", a.config.Name).Msg("Agent cleanup completed")
 	return nil
+}
+
+// generateManifest creates a manifest.json file for the trace viewer
+func (a *realAgent) generateManifest() error {
+	if a.runDir == "" || a.runID == "" {
+		return nil // Tracing not enabled, skip manifest generation
+	}
+
+	tracePath := filepath.Join(a.runDir, "trace.jsonl")
+
+	// Check if trace file exists
+	if _, err := os.Stat(tracePath); err != nil {
+		return nil // No trace file, skip manifest generation
+	}
+
+	// Read trace file and calculate statistics
+	data, err := ioutil.ReadFile(tracePath)
+	if err != nil {
+		return nil // Can't read trace, skip silently
+	}
+
+	type TraceRun struct {
+		RunID         string    `json:"run_id"`
+		Command       string    `json:"command"`
+		Status        string    `json:"status"`
+		StartTime     time.Time `json:"start_time"`
+		EndTime       time.Time `json:"end_time"`
+		Duration      float64   `json:"duration_seconds"`
+		SpanCount     int       `json:"span_count"`
+		LLMCalls      int       `json:"llm_calls"`
+		TotalTokens   int       `json:"total_tokens"`
+		EstimatedCost float64   `json:"estimated_cost"`
+	}
+
+	var manifest TraceRun
+	manifest.RunID = a.runID
+	manifest.Command = a.config.Name
+	manifest.Status = "completed"
+
+	// Parse trace data to extract metrics
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	var firstTime, lastTime time.Time
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var span map[string]interface{}
+		if err := json.Unmarshal(line, &span); err != nil {
+			continue
+		}
+
+		manifest.SpanCount++
+
+		// Check if this is an LLM span
+		if spanName, ok := span["Name"].(string); ok {
+			if strings.Contains(spanName, "llm") {
+				manifest.LLMCalls++
+			}
+		}
+
+		// Extract timestamps
+		if st, ok := span["StartTime"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, st); err == nil {
+				if firstTime.IsZero() || t.Before(firstTime) {
+					firstTime = t
+				}
+			}
+		}
+
+		if et, ok := span["EndTime"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, et); err == nil {
+				if t.After(lastTime) {
+					lastTime = t
+				}
+			}
+		}
+	}
+
+	// Set times
+	if !firstTime.IsZero() {
+		manifest.StartTime = firstTime
+	}
+	if !lastTime.IsZero() {
+		manifest.EndTime = lastTime
+	} else if !firstTime.IsZero() {
+		manifest.EndTime = firstTime
+	}
+
+	// Calculate duration
+	if !manifest.StartTime.IsZero() && !manifest.EndTime.IsZero() {
+		manifest.Duration = manifest.EndTime.Sub(manifest.StartTime).Seconds()
+	}
+
+	// Write manifest.json
+	manifestPath := filepath.Join(a.runDir, "manifest.json")
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil // Can't marshal, skip silently
+	}
+
+	return ioutil.WriteFile(manifestPath, manifestData, 0644)
 }
 
 // =============================================================================
@@ -1198,6 +1390,35 @@ func (a *realAgent) executeTool(ctx context.Context, toolCall ToolCall) ToolCall
 		return toolCall
 	}
 
+	// Check if this is an MCP tool (which creates its own spans)
+	_, isMCPTool := tool.(*mcpToolWrapper)
+
+	var span trace.Span
+
+	// Only create a parent span for non-MCP tools (native tools)
+	// MCP tools create their own agk.mcp.tool.call spans which capture all metrics
+	if !isMCPTool {
+		tracer := otel.Tracer("agenticgokit.tools")
+		var spanCtx context.Context
+		spanCtx, span = tracer.Start(ctx, "agk.tool.call",
+			trace.WithAttributes(
+				attribute.String(observability.AttrToolName, toolCall.Name),
+			))
+		ctx = spanCtx
+		defer span.End()
+	}
+
+	// Record input size
+	inputSize := 0
+	if toolCall.Arguments != nil {
+		if jsonBytes, err := json.Marshal(toolCall.Arguments); err == nil {
+			inputSize = len(jsonBytes)
+		}
+	}
+	if span != nil {
+		span.SetAttributes(attribute.Int("agk.tool.input_bytes", inputSize))
+	}
+
 	// Execute the tool
 	result, err := tool.Execute(ctx, toolCall.Arguments)
 	toolCall.Duration = time.Since(startTime)
@@ -1208,12 +1429,22 @@ func (a *realAgent) executeTool(ctx context.Context, toolCall ToolCall) ToolCall
 		if result != nil {
 			toolCall.Result = result.Content
 		}
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "tool execution failed")
+			span.SetAttributes(attribute.Int64(observability.AttrToolLatencyMs, toolCall.Duration.Milliseconds()))
+		}
 		return toolCall
 	}
 
 	if result == nil {
 		toolCall.Error = "tool returned nil result"
 		toolCall.Success = false
+		if span != nil {
+			span.RecordError(fmt.Errorf("tool returned nil result"))
+			span.SetStatus(codes.Error, "tool returned nil result")
+			span.SetAttributes(attribute.Int64(observability.AttrToolLatencyMs, toolCall.Duration.Milliseconds()))
+		}
 		return toolCall
 	}
 
@@ -1222,6 +1453,27 @@ func (a *realAgent) executeTool(ctx context.Context, toolCall ToolCall) ToolCall
 	toolCall.Result = result.Content
 	if !result.Success {
 		toolCall.Error = result.Error
+		if span != nil {
+			span.SetStatus(codes.Error, result.Error)
+		}
+	} else if span != nil {
+		span.SetStatus(codes.Ok, "tool execution successful")
+	}
+
+	// Record output size
+	outputSize := 0
+	if contentStr, ok := toolCall.Result.(string); ok {
+		outputSize = len(contentStr)
+	} else if contentBytes, ok := toolCall.Result.([]byte); ok {
+		outputSize = len(contentBytes)
+	}
+
+	if span != nil {
+		span.SetAttributes(
+			attribute.Int64(observability.AttrToolLatencyMs, toolCall.Duration.Milliseconds()),
+			attribute.Int("agk.tool.output_bytes", outputSize),
+			attribute.Bool("agk.tool.success", toolCall.Success),
+		)
 	}
 
 	return toolCall
