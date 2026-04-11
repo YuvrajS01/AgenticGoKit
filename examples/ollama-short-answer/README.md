@@ -1,28 +1,25 @@
-# Ollama Short Answer Agent - vNext API Example
+# Ollama Short Answer Agent - v1beta API Example
 
-> ⚠️ **IMPORTANT**: The vNext builder currently returns **mock responses** instead of calling actual LLMs. This example demonstrates the API design and usage patterns. For working LLM integration, use `core.SimpleAgent` (see [examples/01-simple-agent](../../01-simple-agent/)). See [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md) for details.
-
-This example demonstrates how to create a simple, single-agent application using the AgenticGoKit vNext public APIs. The agent uses Ollama as the LLM provider and is configured to provide short, concise answers to user queries.
+This example demonstrates how to create a simple, single-agent application using the AgenticGoKit v1beta public APIs. The agent uses Ollama as the LLM provider and is configured to provide short, concise answers to user queries.
 
 ## Features
 
-- ✅ Uses **vNext public APIs** (Builder pattern)
-- ✅ **Ollama integration** for local LLM execution (when implemented)
+- ✅ Uses **v1beta public APIs** (Builder pattern)
+- ✅ **Ollama integration** for local LLM execution
 - ✅ **Short answer optimization** with system prompts and token limits
 - ✅ **Clean error handling** and timeout management
 - ✅ **Simple, readable code** for learning purposes
 
 ## Current Status
 
-📝 **API Design Complete** - The code demonstrates correct API usage  
-⏳ **Implementation Pending** - Actual LLM calls are not yet implemented  
+✅ **Implementation Complete** - Full LLM integration working  
 ✅ **Compiles Successfully** - All code is syntactically correct
 
 ## Prerequisites
 
-1. **Go 1.23+** installed
+1. **Go 1.24+** installed
 2. **Ollama** installed and running
-3. **Llama 3.2 model** pulled in Ollama
+3. **gemma3:1b model** pulled in Ollama
 
 ### Install Ollama
 
@@ -37,7 +34,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 ### Pull the Model
 
 ```bash
-ollama pull llama3.2
+ollama pull gemma3:1b
 ```
 
 Verify Ollama is running:
@@ -62,20 +59,30 @@ The agent is configured with:
 - **System Prompt**: Instructs the LLM to provide short, 2-3 sentence answers
 - **Low Temperature** (0.3): More focused and deterministic responses
 - **Limited Tokens** (200): Enforces brevity
-- **Ollama Provider**: Uses local Llama 3.2 model
+- **Ollama Provider**: Uses local gemma3:1b model
 
 ```go
-config := &vnext.Config{
+config := &v1beta.Config{
     Name:         "short-answer-agent",
     SystemPrompt: systemPrompt,
     Timeout:      30 * time.Second,
-    LLM: vnext.LLMConfig{
+    LLM: v1beta.LLMConfig{
         Provider:    "ollama",
-        Model:       "llama3.2",
+        Model:       "gemma3:1b",
         Temperature: 0.3,
         MaxTokens:   200,
     },
 }
+```
+
+### 2. Builder Pattern
+
+The agent is built using the v1beta Builder pattern:
+
+```go
+agent, err := v1beta.NewBuilder("short-answer-agent").
+    WithConfig(config).
+    Build()
 ```
 
 ### 2. Builder Pattern
@@ -106,14 +113,14 @@ result, err := agent.Run(ctx, query)
 ### Option 1: Direct Execution
 
 ```bash
-cd examples/vnext/ollama-short-answer
+cd examples/ollama-short-answer
 go run main.go
 ```
 
 ### Option 2: Build and Run
 
 ```bash
-cd examples/vnext/ollama-short-answer
+cd examples/ollama-short-answer
 go build -o ollama-agent
 ./ollama-agent
 ```
@@ -121,26 +128,26 @@ go build -o ollama-agent
 ## Expected Output
 
 ```
-===========================================
-  Ollama Short Answer Agent - vNext API
-===========================================
+==========================================
+  Ollama Short Answer Agent - v1beta API
+==========================================
 
-[Query 1] What is Go programming language?
+[Query 1] What is 2+29?
 ---
-✓ Answer: Go is a statically typed, compiled programming language developed by Google. It's designed for simplicity, efficiency, and easy concurrency with built-in support for goroutines.
+✓ Answer: 31
    Duration: 1.2s
    Success: true
 
 [Query 2] Explain what Docker is.
 ---
-✓ Answer: Docker is a platform for developing, shipping, and running applications in containers. Containers package software with all dependencies, ensuring consistent execution across environments.
+✓ Answer: Docker is a platform for developing, shipping, and running applications in containers.
    Duration: 1.1s
    Success: true
 
 ...
 ```
 
-## Key vNext APIs Used
+## Key v1beta APIs Used
 
 ### Agent Interface
 - `agent.Run(ctx, input)` - Execute agent with input
@@ -148,15 +155,13 @@ go build -o ollama-agent
 - `agent.Cleanup(ctx)` - Clean up agent resources
 
 ### Builder Pattern
-- `vnext.NewBuilder(name)` - Create new agent builder
+- `v1beta.NewBuilder(name)` - Create new agent builder
 - `WithConfig(config)` - Set complete configuration
-- `WithPreset(preset)` - Apply preset configuration
 - `Build()` - Build the final agent
 
 ### Configuration Types
-- `vnext.Config` - Main agent configuration
-- `vnext.LLMConfig` - LLM provider settings
-- `vnext.ChatAgent` - Chat agent preset
+- `v1beta.Config` - Main agent configuration
+- `v1beta.LLMConfig` - LLM provider settings
 
 ### Result Type
 - `result.Content` - Agent response text
@@ -168,7 +173,7 @@ go build -o ollama-agent
 ### Change the Model
 
 ```go
-config.LLM.Model = "mistral"  // or "codellama", "gemma", etc.
+config.LLM.Model = "llama3.2"  // or "mistral", "gemma3:1b", etc.
 ```
 
 ### Adjust Response Length
@@ -201,8 +206,8 @@ Solution: Start Ollama service
 
 ### Model Not Found
 ```
-Error: model 'llama3.2' not found
-Solution: Run 'ollama pull llama3.2'
+Error: model 'gemma3:1b' not found
+Solution: Run 'ollama pull gemma3:1b'
 ```
 
 ### Timeout Errors
@@ -220,13 +225,13 @@ Solution: Increase timeout in config or query context
 
 ## Related Examples
 
-- `examples/vnext/ollama-streaming/` - Streaming responses
-- `examples/vnext/ollama-with-memory/` - Conversation memory
-- `examples/vnext/ollama-with-tools/` - Tool integration
+- `examples/ollama-streaming/` - Streaming responses
+- `examples/ollama-with-memory/` - Conversation memory
+- `examples/ollama-with-tools/` - Tool integration
 
 ## References
 
-- [vNext Documentation](../../../docs/vnext/)
-- [Builder Pattern Guide](../../../core/vnext/builder.go)
-- [Configuration Guide](../../../core/vnext/config.go)
+- [v1beta Documentation](../../../v1beta/)
+- [Builder Pattern Guide](../../../v1beta/builder.go)
+- [Configuration Guide](../../../v1beta/config.go)
 - [Ollama Documentation](https://github.com/ollama/ollama)

@@ -6,13 +6,13 @@ import (
 	"log"
 	"time"
 
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
 	_ "github.com/agenticgokit/agenticgokit/plugins/llm/ollama"
+	"github.com/agenticgokit/agenticgokit/v1beta"
 )
 
 func main() {
 	fmt.Println("===========================================")
-	fmt.Println("  Ollama Short Answer Agent - vNext API")
+	fmt.Println("  Ollama Short Answer Agent - v1beta API")
 	fmt.Println("===========================================\n")
 
 	// Create a simple chat agent using Ollama with short, concise responses
@@ -63,32 +63,26 @@ func main() {
 }
 
 // createShortAnswerAgent creates an Ollama-based agent that provides short, concise answers
-func createShortAnswerAgent() (vnext.Agent, error) {
-	// Define the system prompt for short answers
+func createShortAnswerAgent() (v1beta.Agent, error) {
 	systemPrompt := `You are a helpful AI assistant that provides short, concise answers.
 Keep your responses to 2-3 sentences maximum.
 Be direct and to the point.
 Do not provide long explanations unless specifically asked.`
 
-	// Create agent configuration
-	config := &vnext.Config{
+	config := &v1beta.Config{
 		Name:         "short-answer-agent",
 		SystemPrompt: systemPrompt,
 		Timeout:      30 * time.Second,
-		DebugMode:    false,
-		LLM: vnext.LLMConfig{
+		LLM: v1beta.LLMConfig{
 			Provider:    "ollama",
-			Model:       "gemma3:1b",              // Using Llama 3.2 model
-			Temperature: 0.3,                      // Lower temperature for more focused answers
-			MaxTokens:   200,                      // Limit tokens to keep answers short
-			BaseURL:     "http://localhost:11434", // Default Ollama URL
+			Model:       "llama3.2:1b",
+			Temperature: 0.3,
+			MaxTokens:   200,
 		},
 	}
 
-	// Build the agent using the Builder pattern with ChatAgent preset
-	agent, err := vnext.NewBuilder(config.Name).
+	agent, err := v1beta.NewBuilder("short-answer-agent").
 		WithConfig(config).
-		WithPreset(vnext.ChatAgent).
 		Build()
 
 	if err != nil {
@@ -97,6 +91,3 @@ Do not provide long explanations unless specifically asked.`
 
 	return agent, nil
 }
-
-
-
