@@ -85,16 +85,6 @@ agent, err := v1beta.NewBuilder("short-answer-agent").
     Build()
 ```
 
-### 2. Builder Pattern
-
-The agent is built using the vNext Builder pattern with the `ChatAgent` preset:
-
-```go
-agent, err := vnext.NewBuilder(config.Name).
-    WithConfig(config).
-    WithPreset(vnext.ChatAgent).
-    Build()
-```
 
 ### 3. Agent Execution
 
@@ -223,11 +213,6 @@ Solution: Increase timeout in config or query context
 - **Add Tools**: Integrate external tools with `WithTools()`
 - **Configuration File**: Load settings from TOML file
 
-## Related Examples
-
-- `examples/ollama-streaming/` - Streaming responses
-- `examples/ollama-with-memory/` - Conversation memory
-- `examples/ollama-with-tools/` - Tool integration
 
 ## References
 
