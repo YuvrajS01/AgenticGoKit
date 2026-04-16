@@ -75,7 +75,7 @@ Do not provide long explanations unless specifically asked.`
 		Timeout:      30 * time.Second,
 		LLM: v1beta.LLMConfig{
 			Provider:    "ollama",
-			Model:       "llama3.2:1b",
+			Model:       "gemma3:1b",
 			Temperature: 0.3,
 			MaxTokens:   200,
 		},
