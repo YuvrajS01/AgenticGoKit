@@ -7,13 +7,13 @@ import (
 	"os"
 	"time"
 
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
 	_ "github.com/agenticgokit/agenticgokit/plugins/llm/ollama"
+	v1beta "github.com/agenticgokit/agenticgokit/v1beta"
 )
 
 func main() {
 	fmt.Println("===========================================")
-	fmt.Println("  Ollama TOML Config Agent - vNext API")
+	fmt.Println("  Ollama TOML Config Agent - v1beta API")
 	fmt.Println("===========================================\n")
 
 	// Check if config file exists
@@ -24,7 +24,7 @@ func main() {
 
 	// Load configuration from TOML file
 	fmt.Printf("Loading configuration from: %s\n", configPath)
-	config, err := vnext.LoadConfigFromTOML(configPath)
+	config, err := v1beta.LoadConfigFromTOML(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -36,7 +36,7 @@ func main() {
 	fmt.Printf("  Max Tokens: %d\n\n", config.LLM.MaxTokens)
 
 	// Build agent from configuration (no preset needed - using config directly)
-	agent, err := vnext.NewBuilder(config.Name).
+	agent, err := v1beta.NewBuilder(config.Name).
 		WithConfig(config).
 		Build()
 
@@ -80,6 +80,3 @@ func main() {
 	fmt.Println("  TOML Config demo completed!")
 	fmt.Println("===========================================")
 }
-
-
-
