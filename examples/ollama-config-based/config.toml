@@ -1,5 +1,5 @@
 # Short Answer Agent Configuration
-# This demonstrates TOML-based configuration for vNext agents
+# This demonstrates TOML-based configuration for v1beta agents
 
 name = "ollama-helper"
 system_prompt = """You are a helpful AI assistant that provides short, concise answers.
@@ -13,7 +13,7 @@ debug_mode = false
 # LLM Configuration
 [llm]
 provider = "ollama"
-model = "gemma3:1b"
+model = "llama3.2:1b"
 temperature = 0.3
 max_tokens = 200
 base_url = "http://localhost:11434"

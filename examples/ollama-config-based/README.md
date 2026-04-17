@@ -1,8 +1,8 @@
 # Ollama Config-Based Agent Example
 
-> ⚠️ **IMPORTANT**: This demonstrates **configuration patterns** for vNext. The agent returns mock responses currently. For working LLM integration, use `core.SimpleAgent` API. See [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+> ⚠️ **IMPORTANT**: This demonstrates **configuration patterns** for v1beta. The agent returns mock responses currently. For working LLM integration, use `v1beta.SimpleAgent` API. See [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
 
-This example demonstrates **TOML-based configuration** for AgenticGoKit vNext agents.
+This example demonstrates **TOML-based configuration** for AgenticGoKit v1beta agents.
 
 ## Features
 
@@ -19,7 +19,7 @@ This example demonstrates **TOML-based configuration** for AgenticGoKit vNext ag
 ollama pull llama3.2
 
 # Run with default config
-cd examples/vnext/ollama-config-based
+cd examples/ollama-config-based
 go run main.go
 
 # Run with custom config
@@ -48,12 +48,11 @@ max_tokens = 200
 
 ```go
 // Load from file
-config, err := vnext.LoadConfigFromTOML("config.toml")
+config, err := v1beta.LoadConfigFromTOML("config.toml")
 
 // Build agent from config
-agent, err := vnext.NewBuilder(config.Name).
+agent, err := v1beta.NewBuilder(config.Name).
     WithConfig(config).
-    WithPreset(vnext.ChatAgent).
     Build()
 ```
 
@@ -83,4 +82,4 @@ go run main.go config.prod.toml
 - Add environment variables: `api_key = "${OLLAMA_API_KEY}"`
 - Add memory configuration: `[memory]` section
 - Add tools configuration: `[tools]` section
-- Try [Builder Pattern Example](../ollama-short-answer/)
+- Try [Quickstart Example](../ollama-quickstart/)
