@@ -1,6 +1,6 @@
 # Multi-Agent Workflow with Streaming
 
-This example demonstrates how to create multi-agent workflows using vnext.Workflow with real-time streaming support. Watch as specialized agents collaborate in sequence, with each agent's output flowing seamlessly to the next.
+This example demonstrates how to create multi-agent workflows using v1beta.Workflow with real-time streaming support. Watch as specialized agents collaborate in sequence, with each agent's output flowing seamlessly to the next.
 
 ## 🎯 What This Example Shows
 
@@ -13,7 +13,7 @@ This example demonstrates how to create multi-agent workflows using vnext.Workfl
 - **Automatic Data Flow**: Research output automatically feeds into summarizer
 - **Progress Tracking**: See step-by-step progress with metadata and timing
 - **Agent Specialization**: Different agents with specialized system prompts
-- **Workflow Orchestration**: Using vnext.Workflow to manage the pipeline
+- **Workflow Orchestration**: Using v1beta.Workflow to manage the pipeline
 
 ## 🚀 Running the Example
 
@@ -34,7 +34,7 @@ This example demonstrates how to create multi-agent workflows using vnext.Workfl
 
 ### Running the Workflow
 ```bash
-cd examples/vnext/streaming_workflow
+cd examples/streaming_workflow
 go run main.go
 ```
 
@@ -48,16 +48,16 @@ go run main.go
 ## 📋 Example Output
 
 ```
-🚀 vnext.Workflow Streaming Showcase
+🚀 v1beta.Workflow Streaming Showcase
 ====================================
-Demonstrating vnext.Workflow streaming!
+Demonstrating v1beta.Workflow streaming!
 
 🔍 Testing Ollama connection...
 ✅ Ollama connection successful
 
-🌟 vnext.Workflow Sequential Streaming
+🌟 v1beta.Workflow Sequential Streaming
 =====================================
-Using real vnext.Workflow with streaming support!
+Using real v1beta.Workflow with streaming support!
 
 🎯 Topic: Benefits of streaming in AI applications
 🔄 Processing through workflow...
@@ -78,7 +78,7 @@ Based on the research findings, here are the key points:
 [Real-time summary tokens continue streaming...]
 
 ============================================================
-🎉 vnext.WORKFLOW STREAMING COMPLETED!
+🎉 v1beta.WORKFLOW STREAMING COMPLETED!
 ============================================================
 ✅ Success: true
 ⏱️ Duration: 75.98 seconds
@@ -94,7 +94,7 @@ Based on the research findings, here are the key points:
 
 ### Key Components
 
-1. **vnext.Workflow**: Orchestrates multi-agent sequences with streaming
+1. **v1beta.Workflow**: Orchestrates multi-agent sequences with streaming
 2. **WorkflowStep**: Defines individual agents and their transformations
 3. **Real-time Streaming**: Uses `workflow.RunStream()` to process tokens as they arrive
 4. **Automatic Data Flow**: Output from one step becomes input to the next
@@ -102,13 +102,13 @@ Based on the research findings, here are the key points:
 ### Workflow Setup
 ```go
 // Create the workflow
-workflow, err := vnext.NewSequentialWorkflow(&vnext.WorkflowConfig{
-    Mode:    vnext.Sequential,
+workflow, err := v1beta.NewSequentialWorkflow(&v1beta.WorkflowConfig{
+    Mode:    v1beta.Sequential,
     Timeout: 180 * time.Second,
 })
 
 // Add steps with agents and transformations
-workflow.AddStep(vnext.WorkflowStep{
+workflow.AddStep(v1beta.WorkflowStep{
     Name:  "research",
     Agent: researcherAgent,
     Transform: func(input string) string {
@@ -116,7 +116,7 @@ workflow.AddStep(vnext.WorkflowStep{
     },
 })
 
-workflow.AddStep(vnext.WorkflowStep{
+workflow.AddStep(v1beta.WorkflowStep{
     Name:  "summarize",
     Agent: summarizerAgent,
     Transform: func(input string) string {
@@ -136,15 +136,15 @@ if err != nil {
 // Process streaming chunks
 for chunk := range stream.Chunks() {
     switch chunk.Type {
-    case vnext.ChunkTypeMetadata:
+    case v1beta.ChunkTypeMetadata:
         // Display step information
         if stepName, ok := chunk.Metadata["step_name"].(string); ok {
             fmt.Printf("🔄 [STEP: %s] %s\n", stepName, chunk.Content)
         }
-    case vnext.ChunkTypeDelta:
+    case v1beta.ChunkTypeDelta:
         // Display real-time tokens
         fmt.Print(chunk.Delta)
-    case vnext.ChunkTypeDone:
+    case v1beta.ChunkTypeDone:
         fmt.Println("✅ Step completed!")
     }
 }
@@ -159,14 +159,14 @@ System: [Working... 75 seconds of silence]
 System: [Complete results appear all at once]
 ```
 
-### With vnext.Workflow Streaming
+### With v1beta.Workflow Streaming
 ```
 User: "Research AI streaming benefits"
 System: "🔄 [STEP: RESEARCH] Step 1/2: research"
 System: "Streaming is a really cool way..." [tokens stream live]
 System: "🔄 [STEP: SUMMARIZE] Step 2/2: summarize"
 System: "Based on the research findings..." [tokens stream live]
-System: "✅ vnext.WORKFLOW STREAMING COMPLETED!"
+System: "✅ v1beta.WORKFLOW STREAMING COMPLETED!"
 ```
 
 ### Benefits
@@ -181,14 +181,14 @@ System: "✅ vnext.WORKFLOW STREAMING COMPLETED!"
 ### Different LLM Providers
 ```go
 // OpenAI
-LLM: vnext.LLMConfig{
+LLM: v1beta.LLMConfig{
     Provider: "openai",
     Model:    "gpt-4",
     APIKey:   os.Getenv("OPENAI_API_KEY"),
 }
 
 // Azure OpenAI
-LLM: vnext.LLMConfig{
+LLM: v1beta.LLMConfig{
     Provider: "azure",
     Model:    "gpt-4",
     BaseURL:  "https://your-resource.openai.azure.com/",
@@ -199,7 +199,7 @@ LLM: vnext.LLMConfig{
 ### Adding More Steps
 ```go
 // Add a third analysis step
-workflow.AddStep(vnext.WorkflowStep{
+workflow.AddStep(v1beta.WorkflowStep{
     Name:  "analyze",
     Agent: analysisAgent,
     Transform: func(input string) string {
@@ -211,14 +211,14 @@ workflow.AddStep(vnext.WorkflowStep{
 ### Custom Workflow Types
 ```go
 // Try parallel workflow
-workflow, err := vnext.NewParallelWorkflow(&vnext.WorkflowConfig{
-    Mode:    vnext.Parallel,
+workflow, err := v1beta.NewParallelWorkflow(&v1beta.WorkflowConfig{
+    Mode:    v1beta.Parallel,
     Timeout: 120 * time.Second,
 })
 
 // Try DAG workflow  
-workflow, err := vnext.NewDAGWorkflow(&vnext.WorkflowConfig{
-    Mode:    vnext.DAG,
+workflow, err := v1beta.NewDAGWorkflow(&v1beta.WorkflowConfig{
+    Mode:    v1beta.DAG,
     Timeout: 180 * time.Second,
 })
 ```

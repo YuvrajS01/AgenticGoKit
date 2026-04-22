@@ -7,18 +7,17 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
+	"github.com/agenticgokit/agenticgokit/v1beta"
 )
 
 // CreateResearcherAgent creates a research agent
-func CreateResearcherAgent() (vnext.Agent, error) {
-	return vnext.NewBuilder("Researcher").
-		WithConfig(&vnext.Config{
+func CreateResearcherAgent() (v1beta.Agent, error) {
+	return v1beta.NewBuilder("Researcher").
+		WithConfig(&v1beta.Config{
 			Name:         "researcher",
 			SystemPrompt: "You are a Research Agent. Provide detailed information about the given topic. Be thorough and informative.",
 			Timeout:      60 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "ollama",
 				Model:       "gemma3:1b",
 				Temperature: 0.2,
@@ -30,13 +29,13 @@ func CreateResearcherAgent() (vnext.Agent, error) {
 }
 
 // CreateSummarizerAgent creates a summarizer agent
-func CreateSummarizerAgent() (vnext.Agent, error) {
-	return vnext.NewBuilder("Summarizer").
-		WithConfig(&vnext.Config{
+func CreateSummarizerAgent() (v1beta.Agent, error) {
+	return v1beta.NewBuilder("Summarizer").
+		WithConfig(&v1beta.Config{
 			Name:         "summarizer",
 			SystemPrompt: "You are a Summarizer Agent. Create concise summaries of the given content. Focus on key points and main takeaways.",
 			Timeout:      60 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "ollama",
 				Model:       "gemma3:1b",
 				Temperature: 0.3,
@@ -47,11 +46,11 @@ func CreateSummarizerAgent() (vnext.Agent, error) {
 		Build()
 }
 
-// RunSequentialWorkflowWithVNextStreaming demonstrates the FIXED vnext.Workflow streaming
-func RunSequentialWorkflowWithVNextStreaming() {
-	fmt.Println("🌟 FIXED vnext.Workflow Sequential Streaming")
+// RunSequentialWorkflowWithv1betaStreaming demonstrates the FIXED v1beta.Workflow streaming
+func RunSequentialWorkflowWithv1betaStreaming() {
+	fmt.Println("🌟 FIXED v1beta.Workflow Sequential Streaming")
 	fmt.Println("===========================================")
-	fmt.Println("Using real vnext.Workflow with streaming support!")
+	fmt.Println("Using real v1beta.Workflow with streaming support!")
 	fmt.Println()
 
 	// Disable tracing while constructing agents to avoid per-agent traces
@@ -70,8 +69,8 @@ func RunSequentialWorkflowWithVNextStreaming() {
 	}
 
 	// Create workflow
-	workflow, err := vnext.NewSequentialWorkflow(&vnext.WorkflowConfig{
-		Mode:    vnext.Sequential,
+	workflow, err := v1beta.NewSequentialWorkflow(&v1beta.WorkflowConfig{
+		Mode:    v1beta.Sequential,
 		Timeout: 180 * time.Second, // 3 minutes for the whole workflow
 	})
 	if err != nil {
@@ -82,7 +81,7 @@ func RunSequentialWorkflowWithVNextStreaming() {
 	os.Setenv("AGK_TRACE", prevTrace)
 
 	// Add workflow steps
-	err = workflow.AddStep(vnext.WorkflowStep{
+	err = workflow.AddStep(v1beta.WorkflowStep{
 		Name:  "research",
 		Agent: researcher,
 		Transform: func(input string) string {
@@ -93,7 +92,7 @@ func RunSequentialWorkflowWithVNextStreaming() {
 		log.Fatalf("Failed to add research step: %v", err)
 	}
 
-	err = workflow.AddStep(vnext.WorkflowStep{
+	err = workflow.AddStep(v1beta.WorkflowStep{
 		Name:  "summarize",
 		Agent: summarizer,
 		Transform: func(input string) string {
@@ -138,24 +137,24 @@ func RunSequentialWorkflowWithVNextStreaming() {
 		}
 
 		switch chunk.Type {
-		case vnext.ChunkTypeMetadata:
+		case v1beta.ChunkTypeMetadata:
 			if stepName, ok := chunk.Metadata["step_name"].(string); ok {
 				fmt.Printf("\n🔄 [STEP: %s] %s\n", strings.ToUpper(stepName), chunk.Content)
 				fmt.Println("─────────────────────")
 			} else {
 				fmt.Printf("\n📋 [WORKFLOW] %s\n", chunk.Content)
 			}
-		case vnext.ChunkTypeText:
+		case v1beta.ChunkTypeText:
 			fmt.Print(chunk.Content)
 			finalOutput += chunk.Content
-		case vnext.ChunkTypeDelta:
+		case v1beta.ChunkTypeDelta:
 			fmt.Print(chunk.Delta)
 			finalOutput += chunk.Delta
 			// Track step outputs
 			if stepName, ok := chunk.Metadata["step_name"].(string); ok {
 				stepOutputs[stepName] += chunk.Delta
 			}
-		case vnext.ChunkTypeDone:
+		case v1beta.ChunkTypeDone:
 			fmt.Printf("\n✅ Workflow step completed!")
 		}
 	}
@@ -170,7 +169,7 @@ func RunSequentialWorkflowWithVNextStreaming() {
 
 	// Display results
 	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("🎉 vnext.WORKFLOW STREAMING COMPLETED!")
+	fmt.Println("🎉 v1beta.WORKFLOW STREAMING COMPLETED!")
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("✅ Success: %t\n", result.Success)
 	fmt.Printf("⏱️ Duration: %.2f seconds\n", duration.Seconds())
@@ -187,9 +186,9 @@ func RunSequentialWorkflowWithVNextStreaming() {
 }
 
 func main() {
-	fmt.Println("🚀 vnext.Workflow Streaming Showcase")
+	fmt.Println("🚀 v1beta.Workflow Streaming Showcase")
 	fmt.Println("====================================")
-	fmt.Println("Demonstrating the FIXED vnext.Workflow streaming!")
+	fmt.Println("Demonstrating the FIXED v1beta.Workflow streaming!")
 	fmt.Println()
 
 	// Enable tracing for the workflow, but disable it for the quick test agent
@@ -199,11 +198,11 @@ func main() {
 	prevTrace := os.Getenv("AGK_TRACE")
 	os.Setenv("AGK_TRACE", "false")
 	fmt.Println("🔍 Testing Ollama connection...")
-	testAgent, err := vnext.NewBuilder("Test").
-		WithConfig(&vnext.Config{
+	testAgent, err := v1beta.NewBuilder("Test").
+		WithConfig(&v1beta.Config{
 			Name:    "test",
 			Timeout: 10 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider: "ollama",
 				Model:    "gemma3:1b",
 				BaseURL:  "http://localhost:11434",
@@ -227,8 +226,8 @@ func main() {
 	fmt.Println("✅ Ollama connection successful")
 	fmt.Println()
 
-	// Run the FIXED vnext.Workflow streaming
-	RunSequentialWorkflowWithVNextStreaming()
+	// Run the FIXED v1beta.Workflow streaming
+	RunSequentialWorkflowWithv1betaStreaming()
 
 	fmt.Println("\n🎉 Demo Complete!")
 	fmt.Println("• ✅ Real-time streaming from workflow")

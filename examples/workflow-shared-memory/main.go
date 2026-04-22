@@ -8,7 +8,7 @@ import (
 	"time"
 
 	_ "github.com/agenticgokit/agenticgokit/plugins/memory/chromem" // Register chromem memory provider
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
+	v1beta "github.com/agenticgokit/agenticgokit/v1beta"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 	ctx := context.Background()
 
 	// Create shared memory
-	sharedMemory, err := vnext.NewMemory(&vnext.MemoryConfig{
+	sharedMemory, err := v1beta.NewMemory(&v1beta.MemoryConfig{
 		Enabled:  true,
 		Provider: "chromem",
 	})
@@ -26,8 +26,8 @@ func main() {
 	}
 
 	// Create Agent 1 (Information Learner)
-	agent1, err := vnext.NewBuilder("info-learner").
-		WithConfig(&vnext.Config{
+	agent1, err := v1beta.NewBuilder("info-learner").
+		WithConfig(&v1beta.Config{
 			Name: "info-learner",
 			SystemPrompt: `You are an Information Learner. Your job:
 Extract key facts from the input. Output ONLY the facts in this format:
@@ -39,7 +39,7 @@ Company Name: [name]
 
 Do NOT include any explanations or extra text. Just the facts.`,
 			Timeout: 30 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "ollama",
 				Model:       "gemma3:1b",
 				Temperature: 0.5,
@@ -58,14 +58,14 @@ Do NOT include any explanations or extra text. Just the facts.`,
 	defer agent1.Cleanup(ctx)
 
 	// Create Agent 2 (Question Answerer)
-	agent2, err := vnext.NewBuilder("question-answerer").
-		WithConfig(&vnext.Config{
+	agent2, err := v1beta.NewBuilder("question-answerer").
+		WithConfig(&v1beta.Config{
 			Name: "question-answerer",
 			SystemPrompt: `You are a Question Answerer. Your job:
 Answer the question based ONLY on the learned facts provided.
 Output just the answer - nothing else.`,
 			Timeout: 30 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "ollama",
 				Model:       "gemma3:1b",
 				Temperature: 0.5,
@@ -84,8 +84,8 @@ Output just the answer - nothing else.`,
 	defer agent2.Cleanup(ctx)
 
 	// Create workflow with shared memory
-	workflow, err := vnext.NewSequentialWorkflow(&vnext.WorkflowConfig{
-		Mode:    vnext.Sequential,
+	workflow, err := v1beta.NewSequentialWorkflow(&v1beta.WorkflowConfig{
+		Mode:    v1beta.Sequential,
 		Timeout: 120 * time.Second,
 	})
 	if err != nil {
@@ -95,7 +95,7 @@ Output just the answer - nothing else.`,
 	workflow.SetMemory(sharedMemory)
 
 	// Add agents to workflow
-	workflow.AddStep(vnext.WorkflowStep{
+	workflow.AddStep(v1beta.WorkflowStep{
 		Name:  "learn",
 		Agent: agent1,
 	})
@@ -104,7 +104,7 @@ Output just the answer - nothing else.`,
 	// But it automatically has access to Agent 1's output through shared memory!
 	// The workflow stores Agent 1's output in shared memory,
 	// and Agent 2 queries it via GetWorkflowMemory(ctx)
-	workflow.AddStep(vnext.WorkflowStep{
+	workflow.AddStep(v1beta.WorkflowStep{
 		Name:  "answer",
 		Agent: agent2,
 		Transform: func(_ string) string {

@@ -5,33 +5,30 @@ import (
 	"fmt"
 	"log"
 	"time"
-
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
+	"github.com/agenticgokit/agenticgokit/v1beta"
 	_ "github.com/agenticgokit/agenticgokit/plugins/llm/ollama"
 )
 
 func main() {
 	fmt.Println("===========================================")
-	fmt.Println("  Testing REAL LLM Integration - vNext")
+	fmt.Println("  Testing REAL LLM Integration - v1beta")
 	fmt.Println("===========================================\n")
 
 	// Create a simple agent configuration using an available model
-	config := &vnext.Config{
-		Name:         "test-agent",
-		SystemPrompt: "You are a helpful assistant. Keep your answers very short and concise.",
-		Timeout:      30 * time.Second,
-		LLM: vnext.LLMConfig{
-			Provider:    "ollama",
-			Model:       "gemma3:1b", // Using available model
-			Temperature: 0.7,
-			MaxTokens:   100,
-			BaseURL:     "http://localhost:11434",
-		},
-	}
-
 	fmt.Println("Building agent with real LLM integration...")
-	agent, err := vnext.NewBuilder(config.Name).
-		WithConfig(config).
+	agent, err := v1beta.NewBuilder("test-agent").
+		WithConfig(&v1beta.Config{
+			Name:		 "test-agent",
+			SystemPrompt: "You are a helpful assistant. Keep your answers very short and concise.",
+			Timeout:	  30 * time.Second,
+			LLM: v1beta.LLMConfig{
+				Provider:   "ollama",
+				Model: 	"gemma3:1b", // Using available model
+				Temperature: 0.7,
+				MaxTokens:   100,
+				BaseURL:     "http://localhost:11434",
+			},
+		}).
 		Build()
 
 	if err != nil {

@@ -68,7 +68,7 @@ Agent 2: Answers questions using those facts
 
 ### 1. Create Shared Memory
 ```go
-sharedMemory, err := vnext.NewMemory(&vnext.MemoryConfig{
+sharedMemory, err := v1beta.NewMemory(&v1beta.MemoryConfig{
     Enabled:  true,
     Provider: "chromem",  // Embedded vector database
 })
@@ -76,13 +76,13 @@ sharedMemory, err := vnext.NewMemory(&vnext.MemoryConfig{
 
 ### 2. Create Agents
 ```go
-agent1 := vnext.NewBuilder("agent1").WithConfig(...).Build()
-agent2 := vnext.NewBuilder("agent2").WithConfig(...).Build()
+agent1 := v1beta.NewBuilder("agent1").WithConfig(...).Build()
+agent2 := v1beta.NewBuilder("agent2").WithConfig(...).Build()
 ```
 
 ### 3. Create Workflow and Attach Memory
 ```go
-workflow, _ := vnext.NewSequentialWorkflow(config)
+workflow, _ := v1beta.NewSequentialWorkflow(config)
 workflow.SetMemory(sharedMemory)  // ← This is the KEY line!
 ```
 
@@ -182,7 +182,7 @@ A: Make sure you called: workflow.SetMemory(sharedMemory)
 
 **Q: How do I use PostgreSQL instead of chromem?**
 ```go
-sharedMemory, _ := vnext.NewMemory(&vnext.MemoryConfig{
+sharedMemory, _ := v1beta.NewMemory(&v1beta.MemoryConfig{
     Provider:   "pgvector",
     Connection: "postgresql://user:pass@localhost/dbname",
 })
