@@ -7,7 +7,7 @@ import (
 	"time"
 
 	_ "github.com/agenticgokit/agenticgokit/plugins/llm/foundrylocal" // register foundrylocal provider
-	vnext "github.com/agenticgokit/agenticgokit/v1beta"
+	v1beta "github.com/agenticgokit/agenticgokit/v1beta"
 )
 
 const (
@@ -33,12 +33,12 @@ func main() {
 	// ------------------------------------------------------------------
 	fmt.Println("── Part 1: Basic Chat ─────────────────────")
 
-	chatAgent, err := vnext.NewBuilder("foundry-chat").
-		WithConfig(&vnext.Config{
+	chatAgent, err := v1beta.NewBuilder("foundry-chat").
+		WithConfig(&v1beta.Config{
 			Name:         "foundry-chat",
 			SystemPrompt: "You are a helpful assistant. Keep answers short and clear.",
 			Timeout:      60 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "foundrylocal",
 				Model:       foundryModel,
 				BaseURL:     foundryBaseURL,
@@ -85,12 +85,12 @@ func main() {
 	fmt.Println()
 	fmt.Println("── Part 2: Streaming Chat ──────────────────")
 
-	streamAgent, err := vnext.NewBuilder("foundry-stream").
-		WithConfig(&vnext.Config{
+	streamAgent, err := v1beta.NewBuilder("foundry-stream").
+		WithConfig(&v1beta.Config{
 			Name:         "foundry-stream",
 			SystemPrompt: "You are a creative writer. Be vivid but concise.",
 			Timeout:      90 * time.Second,
-			LLM: vnext.LLMConfig{
+			LLM: v1beta.LLMConfig{
 				Provider:    "foundrylocal",
 				Model:       foundryModel,
 				BaseURL:     foundryBaseURL,
@@ -131,10 +131,10 @@ func main() {
 		}
 
 		switch chunk.Type {
-		case vnext.ChunkTypeDelta:
+		case v1beta.ChunkTypeDelta:
 			fmt.Print(chunk.Delta)
 			tokenCount++
-		case vnext.ChunkTypeDone:
+		case v1beta.ChunkTypeDone:
 			fmt.Println()
 		}
 	}
